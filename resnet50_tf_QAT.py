@@ -43,6 +43,12 @@ from tensorflow.keras.preprocessing.image import ImageDataGenerator
 import tensorflow_model_optimization as tfmot
 from tensorflow.keras.applications import ResNet50
 
+import qunat8
+import quant4
+
+from datetime import datetime
+
+
  
 
 
@@ -54,121 +60,52 @@ from tensorflow.keras.applications import ResNet50
 # In 4 bit quantization both the activations and weights are 4 bit.  In 4 bit quantization changing the dense layer to 8 bit and possibly the input layer will yield better results.
 
  
+def data_generator(mode,data_dir,batch_size,val_split=0.,size=(224,224),augment=False):
 
-numBits = 8
-if(numBits ==8):
-   import quant8
-else:
-   import quant4
+    datagen_kwargs = dict(rescale=1./255, validation_split=val_split)
+    dataflow_kwargs = dict(target_size=size, 
+                           batch_size=batch_size,
+                           interpolation="bilinear",
+                           class_mode='categorical')
 
+
+    if augment:
+      datagen = ImageDataGenerator(rotation_range=20,
+                                    horizontal_flip=True,
+                                    vertical_flip=False,
+                                    width_shift_range=0.2,
+                                    height_shift_range=0.2,
+                                    shear_range=0.2,
+                                    **datagen_kwargs)
+
+    else:
+      datagen = ImageDataGenerator(**datagen_kwargs)
+
+
+
+
+    generator = datagen.flow_from_directory(data_dir,
+                                            subset=mode,
+                                            shuffle=True,
+                                            **dataflow_kwargs)
+    return generator 
+
+def apply_quantization(layer):
+  if isinstance(layer,  Conv2D):
+    return tfmot.quantization.keras.quantize_annotate_layer(layer,quant8.Conv2DQuantizeConfig())
+  elif isinstance(layer,  Activation):
+    return tfmot.quantization.keras.quantize_annotate_layer(layer,quant8.ActivationQuantizeConfig()) 
+  elif isinstance(layer, Dense):
+    return tfmot.quantization.keras.quantize_annotate_layer(layer,quant8.DenseQuantizeConfig())  
+  return layer
+
+def custom_callbacks(path):
+
+  checkpoint_path = os.path.join('logs',current_train_dir,'checkpoints','model-{epoch:02d}-{val_accuracy:.2f}')
  
 
 
-batch_size=32
-train_datagen = ImageDataGenerator(
-                                     horizontal_flip=True,
-                                     vertical_flip=False,
-                                     rotation_range=20,
-                                     preprocessing_function=preprocess_input)
-
-train_generator = train_datagen.flow_from_directory(
-        '/home/ubuntu/work/data.imagenet_nilakshan/train', 
-        target_size=(224, 224), 
-        batch_size=batch_size,
-        shuffle=True,
-        class_mode='categorical'
-        )
-
-
-# In[4]:
-
-
-validation_datagen = ImageDataGenerator(preprocessing_function=preprocess_input)
-validation_generator = validation_datagen.flow_from_directory(
-        '/home/ubuntu/work/data.imagenet_nilakshan/val',  
-       
-        target_size=(224, 224),
-        batch_size=batch_size,
-        shuffle=True,
-        class_mode='categorical'
-        )
-
-
-NUM_EPOCHS = 5
-INIT_LR = 1e-4
-
-
-opt1 =  tf.keras.optimizers.SGD(lr=INIT_LR,momentum=0.9, nesterov=True)
-
-
- 
-model = ResNet50()
-
-model.summary()
-
- 
-
-
-quantize_annotate_layer = tfmot.quantization.keras.quantize_annotate_layer
-quantize_annotate_model = tfmot.quantization.keras.quantize_annotate_model
-quantize_scope = tfmot.quantization.keras.quantize_scope
-if(numBits ==8):
-    with quantize_scope(
-      {'Conv2DQuantizeConfig':quant8.Conv2DQuantizeConfig,
-      'ActivationQuantizeConfig': quant8.ActivationQuantizeConfig,
-      'DenseQuantizeConfig': quant8.ActivationQuantizeConfig}):
- 
-       def apply_quantization(layer):
-          if isinstance(layer,  Conv2D):
-            return tfmot.quantization.keras.quantize_annotate_layer(layer,quant8.Conv2DQuantizeConfig())
-          elif isinstance(layer,  Activation):
-            return tfmot.quantization.keras.quantize_annotate_layer(layer,quant8.ActivationQuantizeConfig()) 
-          elif isinstance(layer, Dense):
-            return tfmot.quantization.keras.quantize_annotate_layer(layer,quant8.DenseQuantizeConfig())  
-          return layer
-        
-       annotated_model = tf.keras.models.clone_model(
-       model,clone_function= apply_quantization)
-       quant_aware_model = tfmot.quantization.keras.quantize_apply(annotated_model)
-       quant_aware_model.summary()
-else:
-    with quantize_scope(
-      {'Conv2DQuantizeConfig':quant4.Conv2DQuantizeConfig,
-      'ActivationQuantizeConfig': quant4.ActivationQuantizeConfig,
-      'DenseQuantizeConfig': quant4.ActivationQuantizeConfig}):
- 
-       def apply_quantization(layer):
-          if isinstance(layer,  Conv2D):
-            return tfmot.quantization.keras.quantize_annotate_layer(layer,quant4.Conv2DQuantizeConfig())
-          elif isinstance(layer,  Activation):
-            return tfmot.quantization.keras.quantize_annotate_layer(layer,quant4.ActivationQuantizeConfig()) 
-          elif isinstance(layer,  Dense):
-            return tfmot.quantization.keras.quantize_annotate_layer(layer,quant4.DenseQuantizeConfig())  
-          return layer
-    
-       annotated_model = tf.keras.models.clone_model(
-       model,clone_function= apply_quantization)
-       quant_aware_model = tfmot.quantization.keras.quantize_apply(annotated_model)
-       quant_aware_model.summary()
-
-
-# In[10]:
-
-
-opt1 =  tf.keras.optimizers.SGD(lr=INIT_LR,momentum=0.9, nesterov=True)
-quant_aware_model.compile(optimizer=opt1,
-             loss='categorical_crossentropy',
-             metrics=['accuracy'])
-
-
-
-from datetime import datetime
-os.makedirs('logs',exist_ok=True)
-current_train_dir = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-os.makedirs(os.path.join('logs',current_train_dir,'checkpoints'),exist_ok=True)
-checkpoint_path = os.path.join('logs',current_train_dir,'checkpoints','model-{epoch:02d}-{val_accuracy:.2f}')
- 
-cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
+  cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
                                                   verbose=1,
                                                   save_best_only=True,
                                                   monitor='val_accuracy',
@@ -176,21 +113,111 @@ cp_callback = tf.keras.callbacks.ModelCheckpoint(filepath=checkpoint_path,
                                                   save_weights_only=True
                                                   )
 
+  tb_callback = tf.keras.callbacks.TensorBoard(log_dir=os.path.join(path,'scalars'))
+  return [cp_callback,tb_callback]
 
-quant_aware_model.fit(train_generator,
-                  batch_size=batch_size, 
-                  steps_per_epoch=40000//batch_size, 
-                  epochs=NUM_EPOCHS,
+
+
+def quantize_aware_model(model,nbits=8):
+
+  quantize_annotate_layer = tfmot.quantization.keras.quantize_annotate_layer
+  quantize_annotate_model = tfmot.quantization.keras.quantize_annotate_model
+  quantize_scope = tfmot.quantization.keras.quantize_scope
+
+
+  if(nbits ==8):
+    with quantize_scope(
+      {'Conv2DQuantizeConfig':quant8.Conv2DQuantizeConfig,
+      'ActivationQuantizeConfig': quant8.ActivationQuantizeConfig,
+      'DenseQuantizeConfig': quant8.ActivationQuantizeConfig}):
+ 
+       
+        
+       annotated_model = tf.keras.models.clone_model(
+       model,clone_function= apply_quantization)
+       quant_aware_model = tfmot.quantization.keras.quantize_apply(annotated_model)
+        
+  else:
+      with quantize_scope(
+        {'Conv2DQuantizeConfig':quant4.Conv2DQuantizeConfig,
+        'ActivationQuantizeConfig': quant4.ActivationQuantizeConfig,
+        'DenseQuantizeConfig': quant4.ActivationQuantizeConfig}):
+   
+        
+      
+         annotated_model = tf.keras.models.clone_model(
+         model,clone_function= apply_quantization)
+         quant_aware_model = tfmot.quantization.keras.quantize_apply(annotated_model)
+      
+  return quant_aware_model
+
+def train(qat_model,train_generator,batch_size,validation_generator=None,epochs=10,learning_rate=0.001):
+
+  optim =  tf.keras.optimizers.SGD(lr=learning_rate,momentum=0.9, nesterov=True)
+
+  qat_model.compile(optimizer=optim,
+                    loss='categorical_crossentropy',
+                    metrics=['accuracy'])
+
+  hist = quant_aware_model.fit(train_generator,
+                  batch_size=train_generator.batch_size, 
+                  steps_per_epoch=train_generator.samples//batch_size, 
+                  epochs=epochs,
                   validation_data = validation_generator,
-                  validation_steps=10000//batch_size,
-                  callbacks =[cp_callback],
-                  verbose=1)
+                  validation_steps=validation_generator.samples//batch_size,
+                  callbacks =custom_callbacks(),
+                  verbose=1).history
 
-os.makedirs(os.path.join('logs',current_train_dir,'saved_model'),exist_ok=True)
-save_path = os.path.join('logs',current_train_dir,'saved_model')
+  return hist
 
-model.save(os.path.join(save_path,'model-{epoch:02d}-{val_accuracy:.2f}.h5'))
 
+
+
+
+
+ 
+
+
+ 
+def quantize_aware_training(args):
+  
+
+  fp_model = ResNet50()
+
+  fp_model.summary()
+
+  qat_model = quant_aware_model(model,args.n)
+  mode = 'train'
+ 
+  train_generator = data_generator(mode,
+                                   args.data,
+                                   args.batch_size,
+                                   args.validation_split,
+                                   augment=True):
+
+  #for checking
+  mode = 'val'
+  validation_generator = data_generator(mode,args.data,args.batch_size)
+
+  train(qat_model,train_generator,batch_size,validation_generator,
+        epochs=args.epochs,learning_rate=arg.learn)
+
+
+
+
+
+
+
+
+
+
+ 
+
+
+
+
+
+ 
 def init_arg_parser():
   """
   Common QAT-CLI arguments
@@ -201,8 +228,16 @@ def init_arg_parser():
 
   parser.add_argument('--epochs', type=int, metavar='N', default=20,
                         help='number of total epochs to run (default: 20')
-  parser.add_argument('-b', '--batch-size', default=326, type=int,
-                        metavar='N', help='mini-batch size (default: 32)')
+  parser.add_argument('-b', '--batch-size', dest='batch_size',default=32, type=int,
+                        metavar='B', help='mini-batch size (default: 32)')
+
+  parser.add_argument('-n', '--num-bits', dest='num_bits',default=8, type=int,
+                        metavar='N', help='activation bit size (default: 8)')
+
+  parser.add_argument('-lr', '--learning-rate', default=0.001,dest='learning_rate' type=float,
+                        metavar='LR', help='initial learning rate (default: 0.001)')
+
+
 
   parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                         help='evaluate model on test set')
@@ -215,6 +250,21 @@ def init_arg_parser():
                         type=float_range(exc_max=True), default=0.1,
                         help='Portion of training dataset to set aside for validation')
   
+
+  # parser.add_argument('--confusion', dest='save_confusion', default=False, action='store_true',
+  #                       help='save the confusion matrix')
+
+  return parser
+
+def main():
+  args = init_arg_parser().parse_args()
+
+  os.makedirs(args.output_dir,exist_ok=True)
+  current_train_dir = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+  os.makedirs(os.path.join(args.output_dir,current_train_dir),exist_ok=True)
+ 
+
+  quantize_aware_training(args)
 
 
 
